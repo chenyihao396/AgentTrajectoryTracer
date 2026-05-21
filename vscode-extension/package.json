@@ -1,0 +1,47 @@
+{
+  "name": "agent-trajectory-tracer-viewer",
+  "displayName": "Agent Trajectory Tracer Viewer",
+  "description": "Visualize AgentTrajectoryTracer trajectory.json observations as an interactive execution graph.",
+  "version": "0.1.0",
+  "publisher": "agent-trajectory-tracer",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:agentTrajectoryTracer.openTrajectory",
+    "onCommand:agentTrajectoryTracer.openLatest"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentTrajectoryTracer.openTrajectory",
+        "title": "Agent Trajectory: Visualize Current trajectory.json"
+      },
+      {
+        "command": "agentTrajectoryTracer.openLatest",
+        "title": "Agent Trajectory: Visualize output/latest"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "agentTrajectoryTracer.openTrajectory",
+          "when": "resourceFilename == trajectory.json",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "agentTrajectoryTracer.openTrajectory",
+          "when": "resourceFilename == trajectory.json",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}
