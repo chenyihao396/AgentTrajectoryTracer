@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+agent_trajectory_tracer/__init__.py
+agent_trajectory_tracer/exporter.py
+agent_trajectory_tracer/openai_wrapper.py
+agent_trajectory_tracer/otel_adapter.py
+agent_trajectory_tracer/schemas.py
+agent_trajectory_tracer/tracer.py
+agent_trajectory_tracer.egg-info/PKG-INFO
+agent_trajectory_tracer.egg-info/SOURCES.txt
+agent_trajectory_tracer.egg-info/dependency_links.txt
+agent_trajectory_tracer.egg-info/requires.txt
+agent_trajectory_tracer.egg-info/top_level.txt

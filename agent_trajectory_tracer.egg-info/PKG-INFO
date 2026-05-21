@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: agent-trajectory-tracer
+Version: 0.1.0
+Summary: Local file-backed AgentTrajectory tracer distilled from Langfuse trace and observation concepts.
+Requires-Python: >=3.9
+Provides-Extra: claude
+Requires-Dist: claude-agent-sdk; extra == "claude"
+Requires-Dist: openinference-instrumentation-claude-agent-sdk; extra == "claude"
+Requires-Dist: opentelemetry-api; extra == "claude"
+Requires-Dist: opentelemetry-sdk; extra == "claude"
