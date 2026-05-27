@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
-from .schemas import ObservationLevel, ObservationRecord, ObservationType, utc_now
+from .schemas import ObservationLevel, ObservationRecord, ObservationType, isoformat, utc_now
 
 
 OPENINFERENCE_KIND_TO_OBSERVATION = {
@@ -207,6 +207,7 @@ class ClaudeAgentSDKAdapter:
         self.exporter = InMemoryTrajectorySpanExporter()
         self._installed = False
         self._ingested_span_ids: set[str] = set()
+        self._parent_observation_overrides: dict[str, str] = {}
         self._otel_provider: Any = None
 
     def install(self) -> "ClaudeAgentSDKAdapter":
@@ -295,6 +296,10 @@ class ClaudeAgentSDKAdapter:
             user_id=attributes.get("user.id") or attributes.get("user_id"),
         )
 
+        parent_observation_id = _parent_id_from_span(span)
+        if parent_observation_id in self._parent_observation_overrides:
+            parent_observation_id = self._parent_observation_overrides[parent_observation_id]
+
         observation = ObservationRecord(
             id=otel_span_id,
             trace_id=trace.id,
@@ -305,12 +310,20 @@ class ClaudeAgentSDKAdapter:
             input=self._observation_input(attributes),
             output=self._observation_output(attributes),
             metadata=self._metadata(span, attributes, otel_trace_id),
-            parent_observation_id=_parent_id_from_span(span),
+            parent_observation_id=parent_observation_id,
             model=self._model(attributes),
             model_parameters=self._model_parameters(attributes),
             usage_details=self._usage_details(attributes),
         )
         observation.level, observation.status_message = _status_from_span(span)
+
+        if self._should_fold_agent_span(observation):
+            generation = self._matching_claude_generation(observation)
+            if generation is not None:
+                self._parent_observation_overrides[observation.id] = generation.id
+                self._merge_agent_span_into_generation(generation, observation)
+                return
+
         self.tracer.observations.append(observation)
 
         trace_output = self._trace_output(attributes)
@@ -322,6 +335,79 @@ class ClaudeAgentSDKAdapter:
                 model=observation.model,
                 response=observation.output,
             )
+
+    def _should_fold_agent_span(self, observation: ObservationRecord) -> bool:
+        return (
+            observation.type == ObservationType.AGENT
+            and observation.name == "ClaudeAgentSDK.ClaudeSDKClient.receive_response"
+        )
+
+    def _matching_claude_generation(
+        self,
+        agent_observation: ObservationRecord,
+    ) -> ObservationRecord | None:
+        candidates = [
+            observation
+            for observation in self.tracer.observations
+            if observation.type == ObservationType.GENERATION
+            and observation.metadata.get("provider") == "claude-agent-sdk"
+        ]
+        if not candidates:
+            return None
+
+        midpoint = agent_observation.start_time
+        if agent_observation.end_time is not None:
+            midpoint = agent_observation.start_time + (
+                agent_observation.end_time - agent_observation.start_time
+            ) / 2
+
+        containing = [
+            observation
+            for observation in candidates
+            if observation.start_time <= midpoint
+            and (observation.end_time is None or observation.end_time >= midpoint)
+        ]
+        if containing:
+            return min(
+                containing,
+                key=lambda observation: (
+                    observation.end_time or midpoint
+                )
+                - observation.start_time,
+            )
+
+        return min(
+            candidates,
+            key=lambda observation: abs(
+                (observation.start_time - agent_observation.start_time).total_seconds()
+            ),
+        )
+
+    def _merge_agent_span_into_generation(
+        self,
+        generation: ObservationRecord,
+        agent_observation: ObservationRecord,
+    ) -> None:
+        generation.metadata.setdefault("openinferenceAgentSpans", []).append(
+            {
+                "id": agent_observation.id,
+                "name": agent_observation.name,
+                "input": agent_observation.input,
+                "output": agent_observation.output,
+                "model": agent_observation.model,
+                "startTime": isoformat(agent_observation.start_time),
+                "endTime": isoformat(agent_observation.end_time),
+                "latency": (
+                    (agent_observation.end_time - agent_observation.start_time).total_seconds()
+                    if agent_observation.end_time is not None
+                    else None
+                ),
+                "usageDetails": agent_observation.usage_details,
+                "metadata": agent_observation.metadata,
+                "level": agent_observation.level.value,
+                "statusMessage": agent_observation.status_message,
+            }
+        )
 
     def _trace_name(self, span: Any, attributes: Mapping[str, Any]) -> Optional[str]:
         return (

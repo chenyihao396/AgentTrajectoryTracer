@@ -199,6 +199,7 @@ class AgentTrajectoryTracer:
         name: str = "claude.query",
         metadata: Optional[dict[str, Any]] = None,
         update_trace_output: bool = True,
+        record_reasoning_event: bool = False,
     ) -> Any:
         """Run one Claude Agent SDK query and record its local trajectory."""
         from .claude_agent_sdk_wrapper import trace_claude_agent_query
@@ -210,6 +211,58 @@ class AgentTrajectoryTracer:
             name=name,
             metadata=metadata,
             update_trace_output=update_trace_output,
+            record_reasoning_event=record_reasoning_event,
+        )
+
+    def MiniSweAgent(
+        self,
+        agent: Any,
+        *,
+        trace_name: Optional[str] = None,
+        trace_tags: Optional[list[str]] = None,
+    ) -> Any:
+        """Wrap a mini-swe-agent agent so model calls and bash actions are traced."""
+        from .mini_swe_agent_wrapper import wrap_mini_swe_agent
+
+        if trace_name is not None:
+            self.default_trace_name = trace_name
+        if trace_tags is not None:
+            self.default_trace_tags = trace_tags
+        return wrap_mini_swe_agent(self, agent)
+
+    def wrap_mini_swe_model(self, model: Any) -> Any:
+        """Wrap a mini-swe-agent model object with GENERATION tracing."""
+        from .mini_swe_agent_wrapper import wrap_mini_swe_model
+
+        return wrap_mini_swe_model(self, model)
+
+    def wrap_mini_swe_environment(self, env: Any) -> Any:
+        """Wrap a mini-swe-agent environment object with TOOL tracing."""
+        from .mini_swe_agent_wrapper import wrap_mini_swe_environment
+
+        return wrap_mini_swe_environment(self, env)
+
+    def trace_mini_swe_agent_run(
+        self,
+        agent: Any,
+        task: str = "",
+        *,
+        name: str = "mini-swe-agent.run",
+        metadata: Optional[dict[str, Any]] = None,
+        update_trace_output: bool = True,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Run a mini-swe-agent task and export its trajectory locally."""
+        from .mini_swe_agent_wrapper import trace_mini_swe_agent_run
+
+        return trace_mini_swe_agent_run(
+            self,
+            agent,
+            task,
+            name=name,
+            metadata=metadata,
+            update_trace_output=update_trace_output,
+            **kwargs,
         )
 
     def ensure_trace(

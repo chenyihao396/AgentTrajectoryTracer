@@ -147,10 +147,78 @@ python example_claude_agent_sdk.py
 
 - 安装一个本地内存 OpenTelemetry exporter。
 - 调用 `ClaudeAgentSDKInstrumentor().instrument()`。
-- 将 `openinference.span.kind=LLM` 映射为 `GENERATION`。
-- 将 `openinference.span.kind=TOOL` 映射为 `TOOL`。
-- 将 `openinference.span.kind=AGENT` 映射为 `AGENT`。
-- 在 `flush()` 时把 spans 转换为当前项目的本地 trajectory 输出。
+- 由 `trace_claude_agent_query(...)` 生成一个统一的 `GENERATION` observation，记录 prompt、answer、reasoning_content、usage 和原始 response。
+- 将 `openinference.span.kind=TOOL` 映射为 `TOOL`，并把 parent 重定向到对应的 `GENERATION`。
+- 将重复的 `ClaudeSDKClient.receive_response` AGENT span 折叠进 `GENERATION.metadata.openinferenceAgentSpans`，避免 observations 中出现两份相同 input/output 的主节点。
+- 在 `flush()` 时把保留的 spans 转换为当前项目的本地 trajectory 输出。
+
+推荐的 Claude Agent SDK 输出结构类似：
+
+```text
+GENERATION llm.<model>
+  ├─ TOOL <tool-name>
+  └─ TOOL <tool-name>
+```
+
+其中 reasoning 会写入：
+
+```text
+GENERATION.output.reasoning_content
+```
+
+## mini-SWE-agent 用法
+
+如果你的 Agent 使用 `mini-swe-agent`，可以直接包裹现有 agent。tracer 会自动记录：
+
+- 每次 `model.query(...)` 为一个 `GENERATION` observation。
+- 每次 `env.execute(action)` 为一个 `TOOL` observation。
+- `GENERATION` 产生的 bash action 会作为对应 `TOOL` 的父节点。
+- mini-swe-agent 的原始 LLM response 会写入 `llm_responses.json/jsonl`。
+
+安装可选依赖：
+
+```bash
+pip install -e ".[swe]"
+```
+
+推荐用法：
+
+```python
+from agent_trajectory_tracer import AgentTrajectoryTracer
+from minisweagent.agents.default import DefaultAgent
+from minisweagent.environments.local import LocalEnvironment
+from minisweagent.models import get_model
+
+tracer = AgentTrajectoryTracer(
+    output_root="output",
+    trace_name="mini_swe_agent_run",
+    trace_tags=["mini-swe-agent"],
+)
+
+agent = DefaultAgent(
+    get_model(input_model_name="..."),
+    LocalEnvironment(cwd="/path/to/project"),
+    ...,
+)
+
+result = tracer.trace_mini_swe_agent_run(agent, "Fix the failing test")
+output_dir = tracer.flush()
+print(output_dir)
+```
+
+如果你已经创建好了 agent，也可以只做原地包裹，然后保持原来的调用方式：
+
+```python
+agent = tracer.MiniSweAgent(agent)
+result = agent.run("Fix the failing test")
+tracer.flush(output=result)
+```
+
+无需 API key 的确定性 demo：
+
+```bash
+python example_mini_swe_agent.py
+```
 
 ## 输出文件
 

@@ -1,2 +1,5 @@
 output/
 .env
+
+# VSCode extension packages
+*.vsix

@@ -12,6 +12,9 @@ claude = [
     "opentelemetry-api",
     "opentelemetry-sdk",
 ]
+swe = [
+    "mini-swe-agent",
+]
 
 [tool.setuptools.packages.find]
 include = ["agent_trajectory_tracer*"]

@@ -54,7 +54,7 @@ async def main() -> None:
     )
 
     prompt = (
-        "Read README.md in the current directory if needed, then explain in one "
+        "Read README.md in the current directory, then explain in one "
         "short paragraph what this project records in an agent trajectory."
     )
 

@@ -233,6 +233,7 @@ async def trace_claude_agent_query(
     name: str = "claude.query",
     metadata: Optional[dict[str, Any]] = None,
     update_trace_output: bool = True,
+    record_reasoning_event: bool = False,
 ) -> ClaudeAgentQueryResult:
     """Run one Claude Agent SDK query and record its intermediate trajectory."""
     messages = [{"role": "user", "content": prompt}]
@@ -285,7 +286,7 @@ async def trace_claude_agent_query(
 
         query_result.reasoning = reasoning_accumulator.to_record()
         query_result.assistant_text = text_accumulator.to_texts()
-        if query_result.reasoning is not None:
+        if record_reasoning_event and query_result.reasoning is not None:
             _record_reasoning_observation(tracer, query_result.reasoning)
 
         if query_result.model:
