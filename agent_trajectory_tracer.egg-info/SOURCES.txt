@@ -1,7 +1,9 @@
 README.md
 pyproject.toml
 agent_trajectory_tracer/__init__.py
+agent_trajectory_tracer/claude_agent_sdk_wrapper.py
 agent_trajectory_tracer/exporter.py
+agent_trajectory_tracer/mini_swe_agent_wrapper.py
 agent_trajectory_tracer/openai_wrapper.py
 agent_trajectory_tracer/otel_adapter.py
 agent_trajectory_tracer/schemas.py

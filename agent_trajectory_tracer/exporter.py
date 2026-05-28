@@ -86,7 +86,8 @@ class LocalTrajectoryExporter:
         write_json(run_dir / "llm_responses.json", llm_response_dicts)
         write_jsonl(run_dir / "observations.jsonl", observation_dicts)
         write_jsonl(run_dir / "scores.jsonl", score_dicts)
-        write_jsonl(run_dir / "events.jsonl", event_dicts)
+        if event_dicts:
+            write_jsonl(run_dir / "events.jsonl", event_dicts)
         write_jsonl(run_dir / "llm_responses.jsonl", llm_response_dicts)
         write_json(run_dir / "summary.json", self._summary(trace, sorted_observations, scores, events))
         (run_dir / "trajectory.md").write_text(

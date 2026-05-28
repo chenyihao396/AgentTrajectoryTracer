@@ -108,8 +108,6 @@ if response_message.tool_calls:
 
 ## Claude Agent SDK 用法
 
-如果你的 Agent 使用 `claude-agent-sdk`，可以复用 Langfuse 官方集成的核心机制：Claude Agent SDK 通过 OpenInference instrumentation 产生 OpenTelemetry spans，本项目不把这些 spans 发到 Langfuse 服务端，而是直接转换为本地 `trajectory.json`、`observations.jsonl` 等文件。
-
 先安装可选依赖：
 
 ```bash

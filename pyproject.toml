@@ -1,7 +1,7 @@
 [project]
 name = "agent-trajectory-tracer"
 version = "0.1.0"
-description = "Local file-backed AgentTrajectory tracer distilled from Langfuse trace and observation concepts."
+description = "Local file-backed AgentTrajectory tracer"
 requires-python = ">=3.9"
 dependencies = []
 

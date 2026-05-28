@@ -140,15 +140,68 @@ function renderHtml(webview, data, filePath) {
       background: var(--panel);
       padding: 16px;
     }
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    h1 {
-      font-size: 17px;
+	    .topbar {
+	      display: flex;
+	      align-items: center;
+	      justify-content: space-between;
+	      gap: 12px;
+	      margin-bottom: 14px;
+	    }
+	    .graph-tools {
+	      position: sticky;
+	      top: 0;
+	      z-index: 10;
+	      display: flex;
+	      align-items: center;
+	      justify-content: space-between;
+	      gap: 10px;
+	      margin: 0 0 10px;
+	      padding: 8px 10px;
+	      border: 1px solid var(--line);
+	      border-radius: 8px;
+	      background: rgba(255, 255, 255, 0.94);
+	      backdrop-filter: blur(6px);
+	    }
+	    .graph-tools-left,
+	    .graph-tools-right {
+	      display: flex;
+	      align-items: center;
+	      gap: 6px;
+	      min-width: 0;
+	    }
+	    .graph-tool-button {
+	      min-width: 30px;
+	      height: 28px;
+	      border: 1px solid var(--line);
+	      border-radius: 6px;
+	      background: #fff;
+	      color: var(--text);
+	      font-weight: 650;
+	      cursor: pointer;
+	    }
+	    .graph-tool-button:hover {
+	      border-color: var(--accent);
+	    }
+	    .graph-tool-button.wide {
+	      min-width: 48px;
+	      padding: 0 8px;
+	    }
+	    .zoom-label {
+	      min-width: 48px;
+	      text-align: center;
+	      color: var(--muted);
+	      font-size: 12px;
+	      font-variant-numeric: tabular-nums;
+	    }
+	    .graph-hint {
+	      color: var(--muted);
+	      font-size: 11px;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	      white-space: nowrap;
+	    }
+	    h1 {
+	      font-size: 17px;
       line-height: 1.25;
       margin: 0;
       font-weight: 650;
@@ -177,9 +230,13 @@ function renderHtml(webview, data, filePath) {
       position: relative;
       padding: 8px 0 20px;
     }
-    .graph-canvas {
-      position: relative;
-    }
+	    .graph-canvas {
+	      position: relative;
+	      transform-origin: 0 0;
+	    }
+	    .graph-stage {
+	      position: relative;
+	    }
     .edge-svg {
       position: absolute;
       inset: 0;
@@ -205,10 +262,15 @@ function renderHtml(webview, data, filePath) {
       stroke-linecap: round;
       stroke-linejoin: round;
     }
-    .edge-path.tool-output {
-      stroke-dasharray: 5 4;
-      stroke: #a8b1bf;
-    }
+	    .edge-path.tool-output {
+	      stroke-dasharray: 5 4;
+	      stroke: #a8b1bf;
+	    }
+	    .edge-path.tool-result {
+	      stroke-dasharray: 6 4;
+	      stroke: #2563eb;
+	      stroke-width: 1.7;
+	    }
     .edge-path.main-edge {
       stroke: #7c8694;
       stroke-width: 1.8;
@@ -395,9 +457,11 @@ function renderHtml(webview, data, filePath) {
     </main>
     <aside class="right" id="details"></aside>
   </div>
-  <script nonce="${nonce}">
-    const state = ${payload};
-    let selectedId = state.observations[0]?.id;
+	  <script nonce="${nonce}">
+	    const state = ${payload};
+	    let selectedId = state.observations[0]?.id;
+	    let graphZoom = 1;
+	    let currentLayout = null;
 
     function esc(value) {
       return String(value ?? "")
@@ -425,32 +489,84 @@ function renderHtml(webview, data, filePath) {
       renderDetails();
     }
 
-    function renderGraph() {
-      const graph = document.getElementById("graph");
-      if (!state.roots.length) {
-        graph.innerHTML = '<div class="empty">No observations found.</div>';
-        return;
-      }
-      const layout = buildGraphLayout();
-      graph.innerHTML =
-        diagnosticsHtml() +
-        '<div class="graph-canvas" style="width:' + layout.width + 'px;height:' + layout.height + 'px">' +
-          edgeSvgHtml(layout) +
-          layout.nodes.map(item =>
-            '<div class="graph-node ' + (item.role === "child" ? "child" : "root") + '" style="left:' + item.x + 'px;top:' + item.y + 'px">' +
-              nodeHtml(item.obs, item.role === "child" ? "child-node" : "main-node") +
-            '</div>'
-          ).join("") +
-          arrowSvgHtml(layout) +
-        '</div>';
-      for (const el of graph.querySelectorAll(".node")) {
-        el.addEventListener("click", () => {
-          selectedId = el.dataset.id;
-          renderGraph();
-          renderDetails();
+	    function renderGraph() {
+	      const graph = document.getElementById("graph");
+	      if (!state.roots.length) {
+	        graph.innerHTML = '<div class="empty">No observations found.</div>';
+	        return;
+	      }
+	      const layout = buildGraphLayout();
+	      currentLayout = layout;
+	      const scaledWidth = Math.ceil(layout.width * graphZoom);
+	      const scaledHeight = Math.ceil(layout.height * graphZoom);
+	      graph.innerHTML =
+	        diagnosticsHtml() +
+	        graphToolsHtml() +
+	        '<div class="graph-stage" style="width:' + scaledWidth + 'px;height:' + scaledHeight + 'px">' +
+	          '<div class="graph-canvas" style="width:' + layout.width + 'px;height:' + layout.height + 'px;transform:scale(' + graphZoom + ')">' +
+	            edgeSvgHtml(layout) +
+	            layout.nodes.map(item =>
+	              '<div class="graph-node ' + (item.role === "child" ? "child" : "root") + '" style="left:' + item.x + 'px;top:' + item.y + 'px">' +
+	                nodeHtml(item.obs, item.role === "child" ? "child-node" : "main-node") +
+	              '</div>'
+	            ).join("") +
+	            arrowSvgHtml(layout) +
+	          '</div>' +
+	        '</div>';
+	      bindGraphTools();
+	      graph.onwheel = (event) => {
+	        if (!event.ctrlKey && !event.metaKey) return;
+	        event.preventDefault();
+	        const direction = event.deltaY > 0 ? -0.08 : 0.08;
+	        setGraphZoom(graphZoom + direction);
+	      };
+	      for (const el of graph.querySelectorAll(".node")) {
+	        el.addEventListener("click", () => {
+	          selectedId = el.dataset.id;
+	          renderGraph();
+	          renderDetails();
         });
-      }
-    }
+	      }
+	    }
+
+	    function graphToolsHtml() {
+	      return '<div class="graph-tools">' +
+	        '<div class="graph-tools-left">' +
+	          '<button class="graph-tool-button" data-zoom-action="out" title="Zoom out">-</button>' +
+	          '<span class="zoom-label">' + Math.round(graphZoom * 100) + '%</span>' +
+	          '<button class="graph-tool-button" data-zoom-action="in" title="Zoom in">+</button>' +
+	          '<button class="graph-tool-button wide" data-zoom-action="reset" title="Reset zoom">100%</button>' +
+	          '<button class="graph-tool-button wide" data-zoom-action="fit" title="Fit graph width">Fit</button>' +
+	        '</div>' +
+	        '<div class="graph-tools-right"><span class="graph-hint">Ctrl/Cmd + wheel zooms the graph</span></div>' +
+	      '</div>';
+	    }
+
+	    function bindGraphTools() {
+	      for (const button of document.querySelectorAll("[data-zoom-action]")) {
+	        button.addEventListener("click", () => {
+	          const action = button.dataset.zoomAction;
+	          if (action === "in") setGraphZoom(graphZoom + 0.1);
+	          else if (action === "out") setGraphZoom(graphZoom - 0.1);
+	          else if (action === "reset") setGraphZoom(1);
+	          else if (action === "fit") fitGraphWidth();
+	        });
+	      }
+	    }
+
+	    function setGraphZoom(value) {
+	      const next = Math.max(0.35, Math.min(1.75, value));
+	      if (Math.abs(next - graphZoom) < 0.001) return;
+	      graphZoom = next;
+	      renderGraph();
+	    }
+
+	    function fitGraphWidth() {
+	      const graph = document.getElementById("graph");
+	      if (!graph || !currentLayout) return;
+	      const availableWidth = Math.max(320, graph.clientWidth - 18);
+	      setGraphZoom(availableWidth / currentLayout.width);
+	    }
 
     function diagnosticsHtml() {
       if (!state.diagnostics || !state.diagnostics.length) return "";
@@ -475,7 +591,7 @@ function renderHtml(webview, data, filePath) {
         cornerRadius: 10,
         portMargin: 22,
         toolTrunkOffset: 8,
-        arrowInset: 0,
+        arrowInset: 10,
       };
       const nodes = [];
       const boxes = {};
@@ -519,8 +635,9 @@ function renderHtml(webview, data, filePath) {
           if (!childBox) return;
           const portY = parent.y + constants.portMargin + (idx + 1) * portSpacing;
 
+          const targetX = childBox.x - constants.arrowInset;
           if (child.type === "TOOL") {
-            const inputEnd = { x: childBox.x, y: childBox.y + childBox.h * 0.32 };
+            const inputEnd = { x: targetX, y: childBox.y + childBox.h * 0.32 };
             edges.push(makeEdge(
               "tool-input",
               obs.id,
@@ -528,32 +645,17 @@ function renderHtml(webview, data, filePath) {
               roundedOrthogonalPath(
                 parentRight,
                 portY - portOffset,
-                childBox.x - constants.arrowInset,
-                childBox.y + childBox.h * 0.32,
+                inputEnd.x,
+                inputEnd.y,
                 trunkX - constants.toolTrunkOffset,
                 constants.cornerRadius
               ),
               { x: trunkX - constants.toolTrunkOffset, y: inputEnd.y },
               inputEnd
             ));
-            const outputEnd = { x: parentRight, y: portY + portOffset };
-            edges.push(makeEdge(
-              "tool-output",
-              child.id,
-              obs.id,
-              roundedOrthogonalPath(
-                childBox.x,
-                childBox.y + childBox.h * 0.68,
-                parentRight + constants.arrowInset,
-                portY + portOffset,
-                trunkX + constants.toolTrunkOffset,
-                constants.cornerRadius
-              ),
-              { x: trunkX + constants.toolTrunkOffset, y: outputEnd.y },
-              outputEnd
-            ));
           } else {
-            const childEnd = { x: childBox.x, y: childBox.y + childBox.h / 2 };
+            const childPortRatio = hasIncomingToolResult(child.id) ? 0.28 : 0.5;
+            const childEnd = { x: targetX, y: childBox.y + childBox.h * childPortRatio };
             edges.push(makeEdge(
               "child",
               obs.id,
@@ -561,8 +663,8 @@ function renderHtml(webview, data, filePath) {
               roundedOrthogonalPath(
                 parentRight,
                 portY,
-                childBox.x - constants.arrowInset,
-                childBox.y + childBox.h / 2,
+                childEnd.x,
+                childEnd.y,
                 trunkX,
                 constants.cornerRadius
               ),
@@ -571,6 +673,21 @@ function renderHtml(webview, data, filePath) {
             ));
           }
         });
+      }
+
+      for (const flow of state.toolResultEdges || []) {
+        const from = boxes[flow.fromId];
+        const to = boxes[flow.toId];
+        if (!from || !to) continue;
+        const resultRoute = toolResultRoute(from, to, constants);
+        edges.push(makeEdge(
+          "tool-result",
+          flow.fromId,
+          flow.toId,
+          resultRoute.path,
+          resultRoute.arrowFrom,
+          resultRoute.arrowTip
+        ));
       }
 
       return {
@@ -612,12 +729,16 @@ function renderHtml(webview, data, filePath) {
         }
       }
 
-      function addNode(obs, role, x, ny, w, h) {
-        const box = { x, y: ny, w, h, depth: role === "root" ? 0 : 1 };
-        boxes[obs.id] = box;
-        maxRight = Math.max(maxRight, x + w);
-        nodes.push({ obs, role, x, y: ny, w, h, depth: box.depth });
-      }
+	      function addNode(obs, role, x, ny, w, h) {
+	        const box = { x, y: ny, w, h, depth: role === "root" ? 0 : 1 };
+	        boxes[obs.id] = box;
+	        maxRight = Math.max(maxRight, x + w);
+	        nodes.push({ obs, role, x, y: ny, w, h, depth: box.depth });
+	      }
+
+	      function hasIncomingToolResult(id) {
+	        return (state.toolResultEdges || []).some(edge => edge.toId === id);
+	      }
 
       function mainFlowEdge(fromId, toId) {
         const from = boxes[fromId];
@@ -640,9 +761,9 @@ function renderHtml(webview, data, filePath) {
       return { kind, fromId, toId, path, arrowFrom, arrowTip };
     }
 
-    function roundedOrthogonalPath(sx, sy, tx, ty, trunkX, radius) {
-      if (Math.abs(sy - ty) < 1) return ['M', sx, sy, 'L', tx, ty].join(' ');
-      if (Math.abs(sx - tx) < 1) return ['M', sx, sy, 'L', sx, ty].join(' ');
+	    function roundedOrthogonalPath(sx, sy, tx, ty, trunkX, radius) {
+	      if (Math.abs(sy - ty) < 1) return ['M', sx, sy, 'L', tx, ty].join(' ');
+	      if (Math.abs(sx - tx) < 1) return ['M', sx, sy, 'L', sx, ty].join(' ');
 
       const xDir1 = Math.sign(trunkX - sx);
       const yDir = Math.sign(ty - sy);
@@ -681,10 +802,54 @@ function renderHtml(webview, data, filePath) {
         'L', trunkX, ty - yDir * r,
         'Q', trunkX, ty, trunkX + xDir2 * r, ty,
         'L', tx, ty
-      ].join(' ');
-    }
+	      ].join(' ');
+	    }
 
-    function roundedZigzagPath(sx, sy, tx, ty, radius) {
+    function toolResultRoute(from, to, constants) {
+      const target = { x: to.x - constants.arrowInset, y: to.y + to.h * 0.78 };
+      const startRight = { x: from.x + from.w, y: from.y + from.h * 0.68 };
+
+      if (startRight.x < target.x - 24) {
+        const trunkX = Math.min(target.x - 42, Math.max(startRight.x + 42, (startRight.x + target.x) / 2));
+        return {
+          path: roundedOrthogonalPath(
+            startRight.x,
+            startRight.y,
+            target.x,
+            target.y,
+            trunkX,
+            constants.cornerRadius
+          ),
+          arrowFrom: { x: trunkX, y: target.y },
+          arrowTip: target,
+        };
+      }
+
+      const startLeft = { x: from.x, y: from.y + from.h * 0.68 };
+      const laneX = Math.min(from.x, to.x) - 58;
+      const yDir = Math.sign(target.y - startLeft.y) || 1;
+      const r = Math.min(
+        constants.cornerRadius,
+        Math.abs(startLeft.x - laneX),
+        Math.abs(target.y - startLeft.y) / 2 || constants.cornerRadius,
+        Math.abs(target.x - laneX)
+      );
+      const path = [
+        'M', startLeft.x, startLeft.y,
+        'L', laneX + r, startLeft.y,
+        'Q', laneX, startLeft.y, laneX, startLeft.y + yDir * r,
+        'L', laneX, target.y - yDir * r,
+        'Q', laneX, target.y, laneX + r, target.y,
+        'L', target.x, target.y
+      ].join(' ');
+      return {
+        path,
+        arrowFrom: { x: laneX, y: target.y },
+        arrowTip: target,
+      };
+    }
+	
+	    function roundedZigzagPath(sx, sy, tx, ty, radius) {
       const midY = (sy + ty) / 2;
       const xDir = Math.sign(tx - sx);
       const y1Dir = Math.sign(midY - sy);
@@ -707,9 +872,10 @@ function renderHtml(webview, data, filePath) {
 
     function edgeSvgHtml(layout) {
       const paths = layout.edges.map(edge => {
-        let klass = "edge-path";
-        if (edge.kind === "tool-output") klass += " tool-output";
-        else if (edge.kind === "tool-input") klass += " tool-input";
+	        let klass = "edge-path";
+	        if (edge.kind === "tool-output") klass += " tool-output";
+	        else if (edge.kind === "tool-result") klass += " tool-result";
+	        else if (edge.kind === "tool-input") klass += " tool-input";
         else if (edge.kind === "main") klass += " main-edge";
         else if (edge.kind === "child") klass += " child-edge";
         return '<path class="' + klass + '" d="' + esc(edge.path) + '"></path>';
@@ -749,7 +915,7 @@ function renderHtml(webview, data, filePath) {
         [baseX + px * arrowHalfWidth, baseY + py * arrowHalfWidth],
         [baseX - px * arrowHalfWidth, baseY - py * arrowHalfWidth],
       ].map(([x, y]) => x.toFixed(2) + "," + y.toFixed(2)).join(" ");
-      const fill = edge.kind === "tool-output" ? "#94a3b8" : "#475569";
+	      const fill = edge.kind === "tool-output" ? "#94a3b8" : edge.kind === "tool-result" ? "#2563eb" : "#475569";
       return '<polygon points="' + points + '" fill="' + fill + '"></polygon>';
     }
 
@@ -814,10 +980,27 @@ function buildViewModel(data, filePath) {
       firstIdByOriginalId.set(obs.originalId, obs.id);
     }
   }
+  const toolObservationIdByCallId = new Map();
+  for (const obs of observations) {
+    const toolCallId = toolCallIdFromObservation(obs);
+    if (toolCallId && !toolObservationIdByCallId.has(toolCallId)) {
+      toolObservationIdByCallId.set(toolCallId, obs.id);
+    }
+  }
+
+  const toolResultEdges = buildToolResultEdges(
+    observations,
+    firstIdByOriginalId,
+    toolObservationIdByCallId
+  );
 
   for (const obs of observations) {
     const rawParentId = obs.originalParentObservationId;
-    const parentId = rawParentId ? firstIdByOriginalId.get(rawParentId) : null;
+    let parentId = rawParentId ? firstIdByOriginalId.get(rawParentId) : null;
+    const sequenceParentId = sequenceParentFromObservation(obs, firstIdByOriginalId, byId);
+    if (sequenceParentId && sequenceParentId !== obs.id) {
+      parentId = sequenceParentId;
+    }
     if (rawParentId && !parentId) {
       diagnostics.push(`Missing parent ${rawParentId} for ${obs.originalId}; rendering it as a root.`);
     }
@@ -847,7 +1030,7 @@ function buildViewModel(data, filePath) {
   const roots = observations.filter((obs) => !obs.parentObservationId || !byId[obs.parentObservationId]);
   roots.sort(compareObservationTime);
   for (const children of Object.values(childrenByParent)) {
-    children.sort(compareObservationTime);
+    children.sort(compareGraphSiblingOrder);
   }
 
   return {
@@ -857,8 +1040,90 @@ function buildViewModel(data, filePath) {
     byId,
     roots,
     childrenByParent,
+    toolResultEdges,
     diagnostics,
   };
+}
+
+function sequenceParentFromObservation(obs, firstIdByOriginalId, byId) {
+  if (obs.type !== "GENERATION") return null;
+  const overriddenParent = obs.metadata?.parentObservationOverride?.previousParentObservationId;
+  if (overriddenParent) {
+    const parentId = firstIdByOriginalId.get(String(overriddenParent));
+    if (parentId && byId[parentId]?.type !== "TOOL") return parentId;
+  }
+  const previousId = obs.input?.previousObservationId;
+  if (previousId) {
+    const parentId = firstIdByOriginalId.get(String(previousId));
+    if (parentId && byId[parentId]?.type !== "TOOL") return parentId;
+  }
+  return null;
+}
+
+function buildToolResultEdges(observations, firstIdByOriginalId, toolObservationIdByCallId) {
+  const edges = [];
+  const seen = new Set();
+  for (const obs of observations) {
+    if (obs.type !== "GENERATION" || !obs.input || typeof obs.input !== "object") {
+      continue;
+    }
+    const sourceIds = [];
+    const afterObservationIds = Array.isArray(obs.input.afterToolObservationIds)
+      ? obs.input.afterToolObservationIds
+      : [];
+    for (const rawId of afterObservationIds) {
+      const sourceId = firstIdByOriginalId.get(String(rawId));
+      if (sourceId) sourceIds.push(sourceId);
+    }
+    const afterCallIds = Array.isArray(obs.input.afterToolCallIds)
+      ? obs.input.afterToolCallIds
+      : [];
+    for (const callId of afterCallIds) {
+      const sourceId = toolObservationIdByCallId.get(String(callId));
+      if (sourceId) sourceIds.push(sourceId);
+    }
+    for (const sourceId of sourceIds) {
+      if (sourceId === obs.id) continue;
+      const key = `${sourceId}->${obs.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ fromId: sourceId, toId: obs.id });
+    }
+  }
+  return edges;
+}
+
+function compareGraphSiblingOrder(a, b) {
+  if (a.type === "TOOL" && consumesToolResult(b, a)) return -1;
+  if (b.type === "TOOL" && consumesToolResult(a, b)) return 1;
+  return compareObservationTime(a, b);
+}
+
+function consumesToolResult(obs, toolObs) {
+  if (!obs || obs.type !== "GENERATION" || !obs.input || typeof obs.input !== "object") {
+    return false;
+  }
+  const toolCallId = toolCallIdFromObservation(toolObs);
+  const afterCallIds = Array.isArray(obs.input.afterToolCallIds)
+    ? obs.input.afterToolCallIds.map(item => String(item))
+    : [];
+  if (toolCallId && afterCallIds.includes(toolCallId)) return true;
+  const afterObservationIds = Array.isArray(obs.input.afterToolObservationIds)
+    ? obs.input.afterToolObservationIds.map(item => String(item))
+    : [];
+  return afterObservationIds.includes(toolObs.id) || afterObservationIds.includes(toolObs.originalId);
+}
+
+function toolCallIdFromObservation(obs) {
+  if (obs.type !== "TOOL") return null;
+  const attrs = obs.metadata?.attributes || {};
+  const id =
+    attrs["tool.id"] ||
+    attrs["gen_ai.tool.call.id"] ||
+    attrs["gen_ai.tool_call.id"] ||
+    obs.input?.tool_id ||
+    obs.input?.toolCallId;
+  return id ? String(id) : null;
 }
 
 function makeUniqueObservations(rawObservations, diagnostics) {

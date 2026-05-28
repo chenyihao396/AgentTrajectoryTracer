@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
 from .schemas import ObservationLevel, ObservationRecord, ObservationType, isoformat, utc_now
+
+_CLAUDE_AGENT_SDK_INSTRUMENTED = False
 
 
 OPENINFERENCE_KIND_TO_OBSERVATION = {
@@ -119,6 +121,183 @@ def _unwrap_openinference_messages(value: Any) -> Any:
     return value
 
 
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text is not None:
+                    parts.append(str(text))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            elif item is not None:
+                parts.append(str(item))
+        return "".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text") or content.get("content")
+        return str(text) if text is not None else json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
+def _tool_calls_from_message(message: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_tool_calls = message.get("tool_calls")
+    if raw_tool_calls is None:
+        return []
+    if isinstance(raw_tool_calls, dict):
+        raw_tool_calls = [raw_tool_calls]
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    tool_calls = []
+    for raw_tool_call in raw_tool_calls:
+        if not isinstance(raw_tool_call, dict):
+            continue
+        tool_call = raw_tool_call.get("tool_call")
+        if not isinstance(tool_call, dict):
+            tool_call = raw_tool_call
+
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            function = {}
+        arguments = function.get("arguments", tool_call.get("arguments"))
+        tool_calls.append(
+            {
+                "id": tool_call.get("id"),
+                "name": function.get("name") or tool_call.get("name"),
+                "arguments": _decode_maybe_json(arguments),
+            }
+        )
+
+    return [
+        tool_call
+        for tool_call in tool_calls
+        if tool_call.get("id") or tool_call.get("name") or tool_call.get("arguments") is not None
+    ]
+
+
+def _claude_output_messages_from_attributes(
+    attributes: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    raw_messages = _nested_attributes(attributes, "llm.output_messages")
+    if raw_messages is None:
+        return []
+    if isinstance(raw_messages, dict):
+        raw_messages = [raw_messages]
+    if not isinstance(raw_messages, list):
+        return []
+
+    messages = []
+    for index, raw_message in enumerate(raw_messages):
+        if not isinstance(raw_message, dict):
+            continue
+        message = raw_message.get("message")
+        if not isinstance(message, dict):
+            message = raw_message
+        content = _content_to_text(message.get("content")).strip()
+        messages.append(
+            {
+                "index": index,
+                "role": message.get("role"),
+                "content": content,
+                "tool_calls": _tool_calls_from_message(message),
+            }
+        )
+    return messages
+
+
+def _tool_id_from_attributes(attributes: Mapping[str, Any]) -> str | None:
+    tool_id = _first_present(
+        attributes,
+        [
+            "tool.id",
+            "gen_ai.tool.call.id",
+            "gen_ai.tool_call.id",
+        ],
+    )
+    return str(tool_id) if tool_id is not None else None
+
+
+def _index_assistant_turn_contexts(assistant_turns: list[Any]) -> dict[str, Any]:
+    by_tool_id: dict[str, dict[str, Any]] = {}
+    content_turns: list[dict[str, Any]] = []
+    for turn in assistant_turns:
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("content"):
+            content_turns.append(turn)
+        for tool_call in turn.get("tool_calls") or []:
+            if not isinstance(tool_call, dict) or not tool_call.get("id"):
+                continue
+            by_tool_id[str(tool_call["id"])] = turn
+    return {
+        "by_tool_id": by_tool_id,
+        "content_turns": content_turns,
+    }
+
+
+def _turn_context_for_message(
+    message: Mapping[str, Any],
+    turn_contexts: Mapping[str, Any],
+) -> dict[str, Any]:
+    by_tool_id = turn_contexts.get("by_tool_id")
+    if isinstance(by_tool_id, dict):
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict) or not tool_call.get("id"):
+                continue
+            turn = by_tool_id.get(str(tool_call["id"]))
+            if isinstance(turn, dict):
+                return turn
+
+    content = message.get("content")
+    if content:
+        content_turns = turn_contexts.get("content_turns")
+        if isinstance(content_turns, list):
+            for turn in content_turns:
+                if not isinstance(turn, dict):
+                    continue
+                turn_content = str(turn.get("content") or "")
+                if turn_content and (
+                    turn_content == content
+                    or turn_content in str(content)
+                    or str(content) in turn_content
+                ):
+                    return turn
+    return {}
+
+
+def _usage_details_from_turn_context(turn_context: Mapping[str, Any]) -> dict[str, float]:
+    usage = turn_context.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+
+    result: dict[str, float] = {}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    cache_creation = usage.get("cache_creation_input_tokens")
+    cache_read = usage.get("cache_read_input_tokens")
+    if isinstance(input_tokens, (int, float)):
+        result["input"] = float(input_tokens)
+        result["prompt_tokens"] = float(input_tokens)
+    if isinstance(output_tokens, (int, float)):
+        result["output"] = float(output_tokens)
+        result["completion_tokens"] = float(output_tokens)
+    if isinstance(cache_creation, (int, float)):
+        result["cache_creation_input_tokens"] = float(cache_creation)
+    if isinstance(cache_read, (int, float)):
+        result["cache_read_input_tokens"] = float(cache_read)
+    if "input" in result and "output" in result:
+        result["total"] = result["input"] + result["output"]
+        result["total_tokens"] = result["total"]
+    return result
+
+
 def _attributes_from_span(span: Any) -> dict[str, Any]:
     raw = getattr(span, "attributes", None) or {}
     return dict(raw)
@@ -208,6 +387,7 @@ class ClaudeAgentSDKAdapter:
         self._installed = False
         self._ingested_span_ids: set[str] = set()
         self._parent_observation_overrides: dict[str, str] = {}
+        self._tool_parent_observation_overrides: dict[str, str] = {}
         self._otel_provider: Any = None
 
     def install(self) -> "ClaudeAgentSDKAdapter":
@@ -227,20 +407,16 @@ class ClaudeAgentSDKAdapter:
             ) from exc
 
         processor = SimpleSpanProcessor(self.exporter)
-        resource = Resource.create({"service.name": self.service_name})
-        provider = TracerProvider(resource=resource)
-        provider.add_span_processor(processor)
-        self._otel_provider = provider
-
-        try:
+        existing_provider = otel_trace.get_tracer_provider()
+        if hasattr(existing_provider, "add_span_processor"):
+            existing_provider.add_span_processor(processor)
+            self._otel_provider = existing_provider
+        else:
+            resource = Resource.create({"service.name": self.service_name})
+            provider = TracerProvider(resource=resource)
+            provider.add_span_processor(processor)
             otel_trace.set_tracer_provider(provider)
-        except Exception:
-            existing_provider = otel_trace.get_tracer_provider()
-            if hasattr(existing_provider, "add_span_processor"):
-                existing_provider.add_span_processor(processor)
-                self._otel_provider = existing_provider
-            else:
-                raise
+            self._otel_provider = provider
 
         if self.auto_instrument:
             self._instrument_claude_agent_sdk()
@@ -249,6 +425,10 @@ class ClaudeAgentSDKAdapter:
         return self
 
     def _instrument_claude_agent_sdk(self) -> None:
+        global _CLAUDE_AGENT_SDK_INSTRUMENTED
+        if _CLAUDE_AGENT_SDK_INSTRUMENTED:
+            return
+
         try:
             from openinference.instrumentation.claude_agent_sdk import (
                 ClaudeAgentSDKInstrumentor,
@@ -264,6 +444,7 @@ class ClaudeAgentSDKAdapter:
             instrumentor.instrument(tracer_provider=self._otel_provider)
         except TypeError:
             instrumentor.instrument()
+        _CLAUDE_AGENT_SDK_INSTRUMENTED = True
 
     def ingest_into_tracer(self) -> None:
         """Convert buffered OTEL spans into local trace and observation records."""
@@ -297,7 +478,10 @@ class ClaudeAgentSDKAdapter:
         )
 
         parent_observation_id = _parent_id_from_span(span)
-        if parent_observation_id in self._parent_observation_overrides:
+        tool_parent_observation_id = self._tool_parent_override(attributes)
+        if tool_parent_observation_id is not None:
+            parent_observation_id = tool_parent_observation_id
+        elif parent_observation_id in self._parent_observation_overrides:
             parent_observation_id = self._parent_observation_overrides[parent_observation_id]
 
         observation = ObservationRecord(
@@ -325,6 +509,7 @@ class ClaudeAgentSDKAdapter:
                 return
 
         self.tracer.observations.append(observation)
+        self._link_existing_assistant_messages_after_tool(observation)
 
         trace_output = self._trace_output(attributes)
         if trace.output is None and trace_output is not None:
@@ -408,6 +593,261 @@ class ClaudeAgentSDKAdapter:
                 "statusMessage": agent_observation.status_message,
             }
         )
+        tool_parent_overrides = self._materialize_claude_output_messages(
+            generation,
+            agent_observation,
+        )
+        if tool_parent_overrides:
+            self._tool_parent_observation_overrides.update(tool_parent_overrides)
+            self._retarget_existing_tool_observations(tool_parent_overrides)
+
+    def _materialize_claude_output_messages(
+        self,
+        generation: ObservationRecord,
+        agent_observation: ObservationRecord,
+    ) -> dict[str, str]:
+        attributes = (
+            agent_observation.metadata.get("attributes", {})
+            if isinstance(agent_observation.metadata, dict)
+            else {}
+        )
+        if not isinstance(attributes, dict):
+            return {}
+
+        messages = _claude_output_messages_from_attributes(attributes)
+        if not messages:
+            return {}
+
+        turn_contexts = self._assistant_turn_contexts(generation.id)
+        tool_observation_ids = self._tool_observation_ids_by_tool_id()
+        tool_parent_overrides: dict[str, str] = {}
+        previous_observation_id: str | None = generation.id
+        previous_turn_id: str | None = None
+        previous_turn_tool_call_ids: list[str] = []
+        created_count = 0
+
+        for message in messages:
+            content = message.get("content")
+            tool_calls = message.get("tool_calls") or []
+            if not content and not tool_calls:
+                continue
+
+            message_index = int(message["index"])
+            observation_id = f"{agent_observation.id}-message-{message_index}"
+            if any(observation.id == observation_id for observation in self.tracer.observations):
+                continue
+
+            turn_context = _turn_context_for_message(message, turn_contexts)
+            turn_id = (
+                str(turn_context.get("message_id"))
+                if isinstance(turn_context.get("message_id"), str)
+                else None
+            )
+            after_tool_call_ids: list[str] = []
+            if turn_id is not None and turn_id != previous_turn_id:
+                after_tool_call_ids = list(previous_turn_tool_call_ids)
+
+            after_tool_observation_ids = [
+                tool_observation_ids[tool_call_id]
+                for tool_call_id in after_tool_call_ids
+                if tool_call_id in tool_observation_ids
+            ]
+            parent_observation_id = (
+                after_tool_observation_ids[-1]
+                if after_tool_observation_ids
+                else previous_observation_id or generation.id
+            )
+
+            timestamp = agent_observation.start_time + timedelta(microseconds=created_count)
+            if agent_observation.end_time is not None and timestamp > agent_observation.end_time:
+                timestamp = agent_observation.end_time
+            end_time = timestamp
+
+            input_payload = self._assistant_message_input(
+                generation,
+                parent_observation_id,
+                after_tool_call_ids,
+                after_tool_observation_ids,
+            )
+            output = {
+                "role": message.get("role") or "assistant",
+                "message_index": message_index,
+            }
+            reasoning_content = turn_context.get("reasoning_content")
+            if reasoning_content:
+                output["reasoning_content"] = reasoning_content
+            output["content"] = content or turn_context.get("content") or ""
+            if tool_calls:
+                output["tool_calls"] = tool_calls
+            if turn_context.get("message_id"):
+                output["message_id"] = turn_context["message_id"]
+
+            observation = ObservationRecord(
+                id=observation_id,
+                trace_id=generation.trace_id,
+                type=ObservationType.GENERATION,
+                start_time=timestamp,
+                end_time=end_time,
+                name=f"claude.assistant_message.{message_index}",
+                input=input_payload,
+                output=output,
+                metadata={
+                    "provider": "claude-agent-sdk",
+                    "source": "openinference.llm.output_messages",
+                    "openinferenceAgentSpanId": agent_observation.id,
+                    "messageIndex": message_index,
+                    "rootGenerationObservationId": generation.id,
+                },
+                parent_observation_id=parent_observation_id,
+                model=generation.model,
+                usage_details=_usage_details_from_turn_context(turn_context),
+            )
+            if turn_context.get("raw_message_indices"):
+                observation.metadata["rawMessageIndices"] = turn_context["raw_message_indices"]
+
+            self.tracer.observations.append(observation)
+            created_count += 1
+
+            for tool_call in tool_calls:
+                tool_id = tool_call.get("id")
+                if tool_id:
+                    tool_parent_overrides[str(tool_id)] = observation.id
+
+            current_tool_call_ids = [
+                str(tool_call["id"])
+                for tool_call in tool_calls
+                if tool_call.get("id")
+            ]
+            previous_observation_id = observation.id
+            if turn_id is not None and turn_id != previous_turn_id:
+                previous_turn_id = turn_id
+                previous_turn_tool_call_ids = current_tool_call_ids
+            elif current_tool_call_ids:
+                previous_turn_tool_call_ids.extend(current_tool_call_ids)
+
+        return tool_parent_overrides
+
+    def _assistant_message_input(
+        self,
+        generation: ObservationRecord,
+        parent_observation_id: str,
+        after_tool_call_ids: list[str],
+        after_tool_observation_ids: list[str],
+    ) -> dict[str, Any]:
+        if after_tool_call_ids or after_tool_observation_ids:
+            payload: dict[str, Any] = {
+                "previousObservationId": parent_observation_id,
+            }
+            if after_tool_call_ids:
+                payload["afterToolCallIds"] = after_tool_call_ids
+            if after_tool_observation_ids:
+                payload["afterToolObservationIds"] = after_tool_observation_ids
+            return payload
+
+        if parent_observation_id != generation.id:
+            return {
+                "previousObservationId": parent_observation_id,
+            }
+
+        return {
+            "messages": (
+                generation.input.get("messages")
+                if isinstance(generation.input, dict) and "messages" in generation.input
+                else generation.input
+            )
+        }
+
+    def _assistant_turn_contexts(self, generation_id: str) -> dict[str, Any]:
+        for llm_response in getattr(self.tracer, "llm_responses", []) or []:
+            if llm_response.get("observationId") != generation_id:
+                continue
+            response = llm_response.get("response")
+            if not isinstance(response, dict):
+                continue
+            assistant_turns = response.get("assistant_turns")
+            if assistant_turns is None and isinstance(response.get("raw_messages"), list):
+                from .claude_agent_sdk_wrapper import assistant_turns_from_raw_messages
+
+                assistant_turns = assistant_turns_from_raw_messages(response["raw_messages"])
+            if isinstance(assistant_turns, list):
+                return _index_assistant_turn_contexts(assistant_turns)
+        return {"by_tool_id": {}, "content_turns": []}
+
+    def _tool_observation_ids_by_tool_id(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for observation in self.tracer.observations:
+            if observation.type != ObservationType.TOOL:
+                continue
+            metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+            attributes = metadata.get("attributes", {})
+            if not isinstance(attributes, dict):
+                continue
+            tool_id = _tool_id_from_attributes(attributes)
+            if tool_id is not None:
+                result[tool_id] = observation.id
+        return result
+
+    def _tool_parent_override(self, attributes: Mapping[str, Any]) -> str | None:
+        tool_id = _tool_id_from_attributes(attributes)
+        if tool_id is None:
+            return None
+        return self._tool_parent_observation_overrides.get(tool_id)
+
+    def _retarget_existing_tool_observations(
+        self,
+        tool_parent_overrides: dict[str, str],
+    ) -> None:
+        for observation in self.tracer.observations:
+            if observation.type != ObservationType.TOOL:
+                continue
+            metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+            attributes = metadata.get("attributes", {})
+            if not isinstance(attributes, dict):
+                continue
+            tool_id = _tool_id_from_attributes(attributes)
+            if tool_id is not None and tool_id in tool_parent_overrides:
+                observation.parent_observation_id = tool_parent_overrides[tool_id]
+
+    def _link_existing_assistant_messages_after_tool(
+        self,
+        tool_observation: ObservationRecord,
+    ) -> None:
+        if tool_observation.type != ObservationType.TOOL:
+            return
+        metadata = tool_observation.metadata if isinstance(tool_observation.metadata, dict) else {}
+        attributes = metadata.get("attributes", {})
+        if not isinstance(attributes, dict):
+            return
+        tool_id = _tool_id_from_attributes(attributes)
+        if tool_id is None:
+            return
+
+        for observation in self.tracer.observations:
+            if observation.type != ObservationType.GENERATION:
+                continue
+            input_payload = observation.input
+            if not isinstance(input_payload, dict):
+                continue
+            after_tool_call_ids = input_payload.get("afterToolCallIds")
+            if not isinstance(after_tool_call_ids, list):
+                continue
+            if tool_id not in {str(item) for item in after_tool_call_ids}:
+                continue
+
+            existing_ids = input_payload.get("afterToolObservationIds")
+            if not isinstance(existing_ids, list):
+                existing_ids = []
+            if tool_observation.id not in existing_ids:
+                input_payload["afterToolObservationIds"] = [
+                    *existing_ids,
+                    tool_observation.id,
+                ]
+            if observation.parent_observation_id != tool_observation.id:
+                observation.metadata.setdefault("parentObservationOverride", {
+                    "previousParentObservationId": observation.parent_observation_id,
+                    "reason": "afterToolCallIds",
+                })
+                observation.parent_observation_id = tool_observation.id
 
     def _trace_name(self, span: Any, attributes: Mapping[str, Any]) -> Optional[str]:
         return (

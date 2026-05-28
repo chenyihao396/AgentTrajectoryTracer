@@ -5,7 +5,9 @@ VSCode extension for visualizing `AgentTrajectoryTracer` `trajectory.json` files
 ## Features
 
 - Opens a `trajectory.json` file as an interactive graph.
+- Zooms the graph with toolbar controls or `Ctrl`/`Cmd` + mouse wheel.
 - Builds a recursive tree layout from `parentObservationId`, computes subtree heights, centers each parent over its children, and renders arrows with SVG paths.
+- Renders Claude follow-up generation nodes in the LLM execution chain and adds dashed TOOL-result edges from consumed tool observations when `afterToolCallIds` or `afterToolObservationIds` is available.
 - Shows root observations as a main execution flow connected by head-to-tail arrows.
 - Shows child observations as right-side branches connected exactly from parent node boundary to child node boundary.
 - Shows TOOL branches with two arrows: parent-to-tool for tool input and tool-to-parent for tool output.

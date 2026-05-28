@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Optional
 
 from .schemas import ObservationType
@@ -180,6 +180,54 @@ class TextAccumulator:
         return [merged] if merged else []
 
 
+class StreamAccumulator:
+    """Build a compact record from token-level Claude stream events."""
+
+    def __init__(self) -> None:
+        self.event_count = 0
+        self.event_types: dict[str, int] = {}
+        self.text_parts: list[str] = []
+        self.thinking_parts: list[str] = []
+        self.signature_parts: list[str] = []
+        self.message: dict[str, Any] = {}
+
+    def add_event(self, event: dict[str, Any]) -> None:
+        self.event_count += 1
+        event_type = str(event.get("type") or "unknown")
+        self.event_types[event_type] = self.event_types.get(event_type, 0) + 1
+
+        message = event.get("message")
+        if isinstance(message, dict):
+            for key in ["id", "model", "role", "stop_reason", "stop_sequence", "usage"]:
+                value = message.get(key)
+                if value is not None:
+                    self.message[key] = value
+
+        delta = event.get("delta")
+        if not isinstance(delta, dict):
+            return
+
+        delta_type = delta.get("type")
+        if delta_type == "text_delta" and delta.get("text"):
+            self.text_parts.append(str(delta["text"]))
+        elif delta_type == "thinking_delta" and delta.get("thinking"):
+            self.thinking_parts.append(str(delta["thinking"]))
+        elif delta_type == "signature_delta" and delta.get("signature"):
+            self.signature_parts.append(str(delta["signature"]))
+
+    def to_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "event_count": self.event_count,
+            "event_types": self.event_types,
+            "message": self.message,
+            "text": "".join(self.text_parts),
+            "thinking": "".join(self.thinking_parts),
+        }
+        if self.signature_parts:
+            record["signature"] = "".join(self.signature_parts)
+        return record
+
+
 @dataclass
 class ClaudeAgentQueryResult:
     prompt: str
@@ -189,6 +237,7 @@ class ClaudeAgentQueryResult:
     model: Optional[str] = None
     usage_details: dict[str, float] = field(default_factory=dict)
     raw_messages: list[Any] = field(default_factory=list)
+    stream: dict[str, Any] = field(default_factory=dict)
 
     @property
     def answer(self) -> str:
@@ -216,13 +265,27 @@ class ClaudeAgentQueryResult:
         return str(self.reasoning.get("thinking") or "")
 
     def to_raw_response(self) -> dict[str, Any]:
+        assistant_turns = assistant_turns_from_raw_messages(self.raw_messages)
         return {
             "provider": "claude-agent-sdk",
             "model": self.model,
-            "messages": self.raw_messages,
+            "messages": self.to_messages(),
+            "assistant_turns": assistant_turns,
+            "stream": self.stream,
+            "raw_messages": self.raw_messages,
             "result": self.result,
             "output": self.to_observation_output(),
         }
+
+    def to_messages(self) -> list[dict[str, Any]]:
+        assistant_message = self.to_observation_output()
+        return [
+            {
+                "role": "user",
+                "content": self.prompt,
+            },
+            assistant_message,
+        ]
 
 
 async def trace_claude_agent_query(
@@ -240,6 +303,7 @@ async def trace_claude_agent_query(
     tracer.ensure_trace(input={"messages": messages})
     reasoning_accumulator = ReasoningAccumulator()
     text_accumulator = TextAccumulator()
+    stream_accumulator = StreamAccumulator()
     query_result = ClaudeAgentQueryResult(prompt=prompt)
 
     with tracer.start_observation(
@@ -254,6 +318,7 @@ async def trace_claude_agent_query(
             query_result.raw_messages.append(_dump_message(message))
             raw_event = getattr(message, "event", None)
             if isinstance(raw_event, dict):
+                stream_accumulator.add_event(raw_event)
                 query_result.model = query_result.model or _model_from_stream_event(raw_event)
                 _merge_usage_details(query_result.usage_details, _usage_from_stream_event(raw_event))
                 stream_thinking = extract_stream_thinking(raw_event)
@@ -286,6 +351,7 @@ async def trace_claude_agent_query(
 
         query_result.reasoning = reasoning_accumulator.to_record()
         query_result.assistant_text = text_accumulator.to_texts()
+        query_result.stream = stream_accumulator.to_record()
         if record_reasoning_event and query_result.reasoning is not None:
             _record_reasoning_observation(tracer, query_result.reasoning)
 
@@ -329,17 +395,122 @@ def _record_reasoning_observation(tracer: Any, reasoning: dict[str, Any]) -> Non
 
 
 def _dump_message(message: Any) -> Any:
-    if hasattr(message, "model_dump"):
-        return message.model_dump(exclude_none=True)
-    if hasattr(message, "dict"):
-        return message.dict()
     event = getattr(message, "event", None)
     if isinstance(event, dict):
         return {
             "type": _message_type(message),
-            "event": event,
+            "event": _json_safe_value(event),
         }
-    return repr(message)
+
+    dumped = _json_safe_value(message)
+    if isinstance(dumped, dict):
+        dumped.setdefault("type", _message_type(message))
+        return dumped
+    return {
+        "type": _message_type(message),
+        "repr": repr(message),
+        "value": dumped,
+    }
+
+
+def assistant_turns_from_raw_messages(raw_messages: list[Any]) -> list[dict[str, Any]]:
+    """Collapse partial AssistantMessage records into assistant turns.
+
+    Claude Agent SDK can emit one AssistantMessage for thinking/text and another
+    AssistantMessage with the same message_id for the tool_use block. Grouping
+    on message_id recovers the rationale that led to each tool call.
+    """
+    turns_by_message_id: dict[str, dict[str, Any]] = {}
+    ordered_turns: list[dict[str, Any]] = []
+
+    for index, raw_message in enumerate(raw_messages):
+        if not isinstance(raw_message, dict) or raw_message.get("type") != "AssistantMessage":
+            continue
+        message_id = raw_message.get("message_id") or raw_message.get("uuid") or f"assistant-{index}"
+        message_id = str(message_id)
+        turn = turns_by_message_id.get(message_id)
+        if turn is None:
+            turn = {
+                "message_id": message_id,
+                "model": raw_message.get("model"),
+                "session_id": raw_message.get("session_id"),
+                "raw_message_indices": [],
+                "reasoning_content": "",
+                "content": "",
+                "tool_calls": [],
+                "usage": {},
+            }
+            turns_by_message_id[message_id] = turn
+            ordered_turns.append(turn)
+
+        turn["raw_message_indices"].append(index)
+        if raw_message.get("model") and not turn.get("model"):
+            turn["model"] = raw_message.get("model")
+        if raw_message.get("session_id") and not turn.get("session_id"):
+            turn["session_id"] = raw_message.get("session_id")
+        if isinstance(raw_message.get("usage"), dict):
+            turn["usage"] = raw_message["usage"]
+
+        for block in raw_message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            thinking = block.get("thinking")
+            if thinking:
+                _append_text_field(turn, "reasoning_content", str(thinking))
+            text = block.get("text")
+            if text:
+                _append_text_field(turn, "content", str(text))
+            tool_id = block.get("id")
+            tool_name = block.get("name")
+            if tool_id or tool_name:
+                turn["tool_calls"].append(
+                    {
+                        "id": tool_id,
+                        "name": tool_name,
+                        "arguments": block.get("input"),
+                    }
+                )
+
+    return ordered_turns
+
+
+def _append_text_field(target: dict[str, Any], key: str, text: str) -> None:
+    if not target.get(key):
+        target[key] = text
+    else:
+        target[key] = f"{target[key]}\n{text}"
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe_value(value.model_dump(exclude_none=True))
+        except Exception:
+            pass
+    if hasattr(value, "dict"):
+        try:
+            return _json_safe_value(value.dict())
+        except Exception:
+            pass
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            return _json_safe_value(asdict(value))
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _json_safe_value(item)
+            for key, item in vars(value).items()
+            if not str(key).startswith("_")
+        }
+    return repr(value)
 
 
 def _model_from_stream_event(event: dict[str, Any]) -> str | None:

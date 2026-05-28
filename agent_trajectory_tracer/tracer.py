@@ -104,7 +104,7 @@ class ObservationHandle:
 
 
 class AgentTrajectoryTracer:
-    """A local, file-backed tracer distilled from Langfuse trace/observation ideas."""
+    """A local, file-backed tracer."""
 
     def __init__(
         self,

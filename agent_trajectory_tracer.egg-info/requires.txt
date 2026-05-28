@@ -4,3 +4,6 @@ claude-agent-sdk
 openinference-instrumentation-claude-agent-sdk
 opentelemetry-api
 opentelemetry-sdk
+
+[swe]
+mini-swe-agent
